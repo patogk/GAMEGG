@@ -5,14 +5,21 @@ Each agent owns a specific domain, enforcing separation of concerns and quality.
 
 ## Technology Stack
 
-- **Engine**: [CHOOSE: Godot 4 / Unity / Unreal Engine 5]
-- **Language**: [CHOOSE: GDScript / C# / C++ / Blueprint]
+- **Engine**: None (custom — Vanilla JS + HTML5 Canvas 2D)
+- **Language**: JavaScript (ES2022+, native ES modules)
+- **Runtime**: Modern browsers (Chrome / Firefox / Safari, last 2 versions)
 - **Version Control**: Git with trunk-based development
-- **Build System**: [SPECIFY after choosing engine]
-- **Asset Pipeline**: [SPECIFY after choosing engine]
+- **Build System**: None — `index.html` + `src/*.js` served as-is (works from `file://` or any static server)
+- **Asset Pipeline**: None in MVP — primitives drawn in code (Canvas 2D); sprite sheets optional post-vertical-slice
+- **Audio**: Web Audio API (lazy-init `AudioContext` on first user input)
+- **Storage**: `localStorage` (settings, unlocks, best scores)
+- **Tuning**: `tuning.js` magic numbers + dat.gui debug overlay (toggle ` ` ` ` `), persist to localStorage
 
-> **Note**: Engine-specialist agents exist for Godot, Unity, and Unreal with
-> dedicated sub-specialists. Use the set matching your engine.
+> **Note**: This project uses a custom web stack — the CCGS engine-specialist
+> agents (godot-*, unity-*, unreal-*) do NOT apply. Code review and architecture
+> decisions are routed to general specialists: `gameplay-programmer`,
+> `engine-programmer`, `ui-programmer`, `tools-programmer`. UI/UX uses
+> `ui-programmer` for HTML/Canvas surfaces.
 
 ## Project Structure
 
