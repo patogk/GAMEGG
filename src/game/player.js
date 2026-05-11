@@ -39,15 +39,16 @@ export class PlayerCharacter {
     this._intentLeft = false;
     this._intentRight = false;
     this._jumpHeld = false;
-    this._facing = 1;
+    this.facing = 1; // public — read by Special
+    this.specialCooldownEndsAt = 0; // public — read by HUD + Special
 
     physics.registerEntity(this);
     collision.registerCircle(this);
 
     // Subscribe inputs
-    bus.on(`${id}-move-left-pressed`,   () => { this._intentLeft = true; this._facing = -1; });
+    bus.on(`${id}-move-left-pressed`,   () => { this._intentLeft = true; this.facing = -1; });
     bus.on(`${id}-move-left-released`,  () => { this._intentLeft = false; });
-    bus.on(`${id}-move-right-pressed`,  () => { this._intentRight = true; this._facing = 1; });
+    bus.on(`${id}-move-right-pressed`,  () => { this._intentRight = true; this.facing = 1; });
     bus.on(`${id}-move-right-released`, () => { this._intentRight = false; });
     bus.on(`${id}-jump-pressed`,        () => { this._jumpBufferedAt = performance.now(); this._jumpHeld = true; });
     bus.on(`${id}-jump-released`,       () => {
@@ -114,7 +115,7 @@ export class PlayerCharacter {
     // Eyes
     ctx.fillStyle = '#000';
     const eyeY = ry - this.radius * 0.15;
-    const eyeOffsetX = this.radius * 0.35 * this._facing;
+    const eyeOffsetX = this.radius * 0.35 * this.facing;
     const eyeR = this.radius * 0.12;
     ctx.beginPath(); ctx.arc(rx - eyeOffsetX * 0.4, eyeY, eyeR, 0, Math.PI * 2); ctx.fill();
     ctx.beginPath(); ctx.arc(rx + eyeOffsetX,        eyeY, eyeR, 0, Math.PI * 2); ctx.fill();

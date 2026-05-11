@@ -38,6 +38,7 @@ export const tuning = {
     groundFriction: 0.05,
     headRadius: 32,
     mass: 1.0,
+    specialCooldownMs: 5000,
   },
 
   ball: {
@@ -62,6 +63,17 @@ export const tuning = {
 
   match: {
     durationSec: 60,    // Tier 0
+    countdownMs: 3000,  // 3, 2, 1, GO
+  },
+
+  special: {
+    fireImpulseRange: 280,
+    fireImpulseVx:    1400,
+    fireImpulseVy:    700,
+    megaJumpVelocity: 1500,
+    freezeDashVx:     1100,
+    magnetPullRange:  240,
+    magnetPullImpulse: 1600,
   },
 
   juice: {
