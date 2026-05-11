@@ -39,9 +39,13 @@ export class Renderer {
       this._dirty = false;
     }
 
-    // Clear
+    // Clear (full screen, no shake offset)
     ctx.fillStyle = tuning.render.bgBlack;
     ctx.fillRect(0, 0, w, h);
+
+    // Screen shake: translate the world after clearing
+    const [sx, sy] = this._ctxWrap.consumeShakeOffset();
+    if (sx !== 0 || sy !== 0) ctx.translate(sx, sy);
 
     // Field lines (faint guides)
     ctx.strokeStyle = tuning.colors.fieldLine;
@@ -59,6 +63,9 @@ export class Renderer {
       catch (err) { console.error('Drawable draw error', d, err); }
       ctx.restore();
     }
+
+    // Undo shake translate so the flash overlay covers full screen
+    if (sx !== 0 || sy !== 0) ctx.translate(-sx, -sy);
 
     // Goal flash overlay
     const now = performance.now();

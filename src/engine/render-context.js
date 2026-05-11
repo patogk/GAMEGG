@@ -20,9 +20,29 @@ export class RenderContext {
     this.ctx = canvas.getContext('2d');
     this._dpr = Math.min(window.devicePixelRatio || 1, 2);
     this._glowCache = new Map(); // `${color}-${r}` → offscreen canvas
+    this._shake = { amplitude: 0, endsAt: 0, totalMs: 0 };
     this._resize();
     window.addEventListener('resize', () => this._resize());
     this._buildGlowCache();
+  }
+
+  setShake(amplitudePx, durationMs) {
+    // strongest of any active shake wins
+    const now = performance.now();
+    if (amplitudePx >= this._shake.amplitude || now >= this._shake.endsAt) {
+      this._shake.amplitude = amplitudePx;
+      this._shake.endsAt = now + durationMs;
+      this._shake.totalMs = durationMs;
+    }
+  }
+
+  consumeShakeOffset() {
+    const now = performance.now();
+    if (now >= this._shake.endsAt || this._shake.amplitude <= 0) return [0, 0];
+    const remaining = this._shake.endsAt - now;
+    const k = remaining / this._shake.totalMs; // 1 → 0
+    const amp = this._shake.amplitude * k;
+    return [(Math.random() * 2 - 1) * amp, (Math.random() * 2 - 1) * amp];
   }
 
   _resize() {

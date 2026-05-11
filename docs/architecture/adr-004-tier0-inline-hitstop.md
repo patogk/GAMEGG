@@ -1,7 +1,7 @@
 # ADR-004: Tier 0 inline hitstop in main.js (defer JuiceController)
 
 ## Status
-Accepted
+Superseded by JuiceController (`src/game/juice.js`, landed in Sprint 01, 2026-05-11). The inline `bus.on('goal-scored', ...)` subscriber in `main.js` was removed; JuiceController now owns goal-triggered hitstop, slow-mo, and screen shake.
 
 ## Date
 2026-05-11

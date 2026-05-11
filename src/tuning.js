@@ -64,6 +64,24 @@ export const tuning = {
     durationSec: 60,    // Tier 0
   },
 
+  juice: {
+    // goal
+    goalHitstopMs: 400,
+    goalSlowmoMs:  600,
+    slowmoTarget:  0.15,
+    goalShakePx:   14,
+    goalShakeMs:   500,
+    // hits
+    hitShakeMinPx: 3,
+    hitShakeMaxPx: 12,
+    hitShakeMs:    120,
+    // posts
+    postShakePx:   18,
+    postShakeMs:   200,
+    // toggles
+    shakeRespectsTimeScale: false,
+  },
+
   render: {
     fieldAspect: 16 / 9,
     goalFlashDurationMs: 400,
