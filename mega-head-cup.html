@@ -1,0 +1,1213 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+<meta charset="UTF-8">
+<title>MEGA HEAD CUP</title>
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<style>
+* { margin:0; padding:0; box-sizing:border-box; }
+html, body { width:100%; height:100%; background:#000; overflow:hidden; font-family:"Space Grotesk", system-ui, sans-serif; color:#E8F1FF; }
+body { display:flex; align-items:center; justify-content:center; }
+#game-canvas { display:block; background:#000; image-rendering:crisp-edges; box-shadow:0 0 80px rgba(0,229,255,.15), 0 0 80px rgba(255,26,161,.15); }
+#boot { position:fixed; bottom:8px; left:50%; transform:translateX(-50%); font-size:12px; color:#5A6F88; pointer-events:none; }
+</style>
+</head>
+<body>
+<canvas id="game-canvas" width="1280" height="720"></canvas>
+<div id="boot">MEGA HEAD CUP · single-file build · v1.0</div>
+<script>
+"use strict";
+
+// ═══════════════════════════════════════════════════════════
+//  TUNING — all magic numbers. Read tuning.X at use site only.
+// ═══════════════════════════════════════════════════════════
+const tuning = {
+  loop: { fixedDtMs: 1000/120, maxSubSteps: 6, maxFrameDeltaMs: 250, slowmoTarget: 0.15, slowmoRampOutMs: 80, tier0HitstopMs: 150 },
+  physics: { gravity: 1800, airFriction: 0.4, airFrictionVertical: 0.95, maxVelocity: 3000 },
+  collision: { restitutionHeadBall: 0.85, restitutionBallFloor: 0.6, restitutionBallWall: 0.7, restitutionBallPost: 0.95, correctionPercent: 0.8, penetrationSlop: 0.5, goalLockMs: 1500 },
+  player: { acceleration: 4000, maxRunSpeed: 600, jumpVelocity: 850, coyoteMs: 100, jumpBufferMs: 120, jumpCutFactor: 0.5, groundFriction: 0.05, headRadius: 32, mass: 1.0, specialCooldownMs: 5000 },
+  ball: { radius: 18, mass: 0.3, spinScale: 0.05, spawnHeightOffset: 100, gravityScale: 1.0 },
+  field: { width: 1280, height: 720, floorY: 640, centerX: 640, centerY: 360, wallThickness: 40, goalWidth: 60, goalHeight: 200, postRadius: 6 },
+  match: { durationSec: 60, countdownMs: 3000 },
+  special: { fireImpulseRange: 280, fireImpulseVx: 1400, fireImpulseVy: 700, megaJumpVelocity: 1500, freezeDashVx: 1100, magnetPullRange: 240, magnetPullImpulse: 1600 },
+  juice: { goalHitstopMs: 400, goalSlowmoMs: 600, slowmoTarget: 0.15, goalShakePx: 14, goalShakeMs: 500, hitShakeMinPx: 3, hitShakeMaxPx: 12, hitShakeMs: 120, postShakePx: 18, postShakeMs: 200 },
+  render: { fieldAspect: 16/9, goalFlashDurationMs: 400, goalFlashMaxAlpha: 0.6, chromaticAberrationMaxOffsetPx: 4, bgBlack: "#000000", interpolationEnabled: true },
+  colors: { bgBlack:"#000000", p1Cyan:"#00E5FF", p2Magenta:"#FF1AA1", ballWhite:"#FFFFFF", fieldLine:"#1F2A38", uiText:"#E8F1FF", uiTextDim:"#5A6F88", impactYellow:"#FFE500", specialOrange:"#FF4D2E", goalLime:"#A6FF00", modifierViolet:"#9D2BFF" },
+  input: {
+    bindings: {
+      "p1-move-left":["KeyA"], "p1-move-right":["KeyD"], "p1-jump":["KeyW"], "p1-special":["KeyG"],
+      "p2-move-left":["ArrowLeft"], "p2-move-right":["ArrowRight"], "p2-jump":["ArrowUp"], "p2-special":["Comma"],
+      "pause":["Escape"], "restart":["KeyR"],
+    },
+    preventDefaultActions: true, suppressRepeat: true, knownRollover: false,
+  },
+};
+
+// ═══════════════════════════════════════════════════════════
+//  CONSTANTS & CATALOGS
+// ═══════════════════════════════════════════════════════════
+const LAYER = { HEAD:1, BALL:2, WALL:4, FLOOR:8, POST:16 };
+const PHASE = { MENU:"menu", CHAR_SELECT:"char-select", COUNTDOWN:"countdown", PLAYING:"playing", GOAL_PAUSE:"goal-pause", RESULT:"result" };
+const CHARACTERS = [
+  { id:"spark", name:"SPARK", accent:"#00E5FF", mouthShape:"smile", specialType:"fire-impulse", specialName:"IMPULSO",       taunt:"¡eso ni lo viste!" },
+  { id:"jumpy", name:"JUMPY", accent:"#A6FF00", mouthShape:"line",  specialType:"mega-jump",    specialName:"MEGA-SALTO",     taunt:"¡saltó como un canguro!" },
+  { id:"zoom",  name:"ZOOM",  accent:"#FF1AA1", mouthShape:"smile", specialType:"freeze-dash",  specialName:"DASH FANTASMA",  taunt:"¡no me viste pasar!" },
+  { id:"pull",  name:"PULL",  accent:"#FFE500", mouthShape:"line",  specialType:"magnet-pull",  specialName:"IMÁN",           taunt:"¡la pelota es mía!" },
+];
+const getCharacterById = id => CHARACTERS.find(c => c.id === id) || CHARACTERS[0];
+const MODIFIERS = [
+  { id:"none",         name:"NORMAL",         emoji:"○",  description:"Partida normal" },
+  { id:"low-gravity",  name:"GRAV. LUNAR",    emoji:"🌙", description:"Gravedad al 35%" },
+  { id:"giant-ball",   name:"BALÓN GIGANTE",  emoji:"🔵", description:"Balón 2x tamaño" },
+  { id:"tiny-goal",    name:"ARCO CHICO",     emoji:"▭",  description:"Porterías 60%" },
+];
+const pickRandomModifier = () => {
+  const pool = MODIFIERS.filter(m => m.id !== "none");
+  return pool[Math.floor(Math.random() * pool.length)].id;
+};
+
+// ═══════════════════════════════════════════════════════════
+//  EventBus
+// ═══════════════════════════════════════════════════════════
+class EventBus {
+  constructor(){ this._h = new Map(); }
+  on(e, h){ if(!this._h.has(e)) this._h.set(e, new Set()); this._h.get(e).add(h); return () => this.off(e, h); }
+  off(e, h){ const s = this._h.get(e); if(s) s.delete(h); }
+  emit(e, p){ const s = this._h.get(e); if(!s) return; for(const h of s){ try{ h(p); }catch(err){ console.error("EventBus["+e+"]", err); } } }
+}
+
+// ═══════════════════════════════════════════════════════════
+//  GameLoop (fixed-step + slow-mo + hitstop)
+// ═══════════════════════════════════════════════════════════
+class GameLoop {
+  constructor(){
+    this._running=false; this._lastNow=0; this._acc=0;
+    this._timeScale=1; this._slowmoEndAt=0; this._slowmoTarget=1; this._hitstopUntil=0;
+    this._update=null; this._render=null; this._rafId=0;
+    this._frame = this._frame.bind(this);
+    document.addEventListener("visibilitychange", () => {
+      if(document.hidden){ this._lastNow=0; this._acc=0; } else { this._lastNow=performance.now(); }
+    });
+  }
+  start(u, r){ this._update=u; this._render=r; this._lastNow=performance.now(); this._running=true; this._rafId=requestAnimationFrame(this._frame); }
+  stop(){ this._running=false; cancelAnimationFrame(this._rafId); }
+  setTimeScale(target, durMs){ this._timeScale=target; this._slowmoTarget=target; this._slowmoEndAt=performance.now()+durMs; }
+  pulseHitstop(ms){ this._hitstopUntil=performance.now()+ms; }
+  getTimeScale(){ return this._timeScale; }
+  _frame(now){
+    if(!this._running) return;
+    this._rafId=requestAnimationFrame(this._frame);
+    if(this._lastNow===0){ this._lastNow=now; return; }
+    const fd = Math.min(now - this._lastNow, tuning.loop.maxFrameDeltaMs);
+    this._lastNow = now;
+    if(this._slowmoEndAt > 0){
+      const rem = this._slowmoEndAt - now;
+      if(rem <= 0){ this._timeScale=1; this._slowmoEndAt=0; }
+      else if(rem < tuning.loop.slowmoRampOutMs){
+        const k = 1 - rem / tuning.loop.slowmoRampOutMs;
+        this._timeScale = this._slowmoTarget + (1 - this._slowmoTarget) * k;
+      }
+    }
+    const inHitstop = now < this._hitstopUntil;
+    if(!inHitstop){
+      this._acc += fd * this._timeScale;
+      const fMs = tuning.loop.fixedDtMs, fS = fMs / 1000;
+      let steps = 0;
+      while(this._acc >= fMs && steps < tuning.loop.maxSubSteps){ this._update(fS); this._acc -= fMs; steps++; }
+      if(steps === tuning.loop.maxSubSteps) this._acc = 0;
+    }
+    const alpha = inHitstop ? 0 : (this._acc / tuning.loop.fixedDtMs);
+    this._render(alpha, now);
+  }
+}
+
+// ═══════════════════════════════════════════════════════════
+//  InputBus
+// ═══════════════════════════════════════════════════════════
+class InputBus {
+  constructor({bus}){
+    this._bus=bus; this._pressed=new Set(); this._justP=new Set(); this._justR=new Set();
+    this._codeMap = new Map();
+    for(const [action, codes] of Object.entries(tuning.input.bindings))
+      for(const code of codes){
+        if(!this._codeMap.has(code)) this._codeMap.set(code, new Set());
+        this._codeMap.get(code).add(action);
+      }
+    window.addEventListener("keydown", e => this._onKey(e, true));
+    window.addEventListener("keyup",   e => this._onKey(e, false));
+    window.addEventListener("blur",    () => this._onBlur());
+  }
+  _onKey(e, down){
+    const acts = this._codeMap.get(e.code);
+    if(!acts) return;
+    if(tuning.input.preventDefaultActions) e.preventDefault();
+    if(down && tuning.input.suppressRepeat && e.repeat) return;
+    for(const a of acts){
+      if(down){
+        if(!this._pressed.has(a)){
+          this._pressed.add(a); this._justP.add(a);
+          this._bus.emit(a + "-pressed");
+        }
+      } else {
+        if(this._pressed.has(a)){
+          this._pressed.delete(a); this._justR.add(a);
+          this._bus.emit(a + "-released");
+        }
+      }
+    }
+  }
+  _onBlur(){
+    for(const a of this._pressed) this._bus.emit(a + "-released");
+    this._pressed.clear(); this._justP.clear(); this._justR.clear();
+    this._bus.emit("all-inputs-released");
+  }
+  isPressed(a){ return this._pressed.has(a); }
+  wasJustPressed(a){ return this._justP.has(a); }
+  tick(){ this._justP.clear(); this._justR.clear(); }
+}
+
+// ═══════════════════════════════════════════════════════════
+//  RenderContext (canvas + glow cache + shake)
+// ═══════════════════════════════════════════════════════════
+const GLOW_COLORS = {
+  cyan: tuning.colors.p1Cyan, magenta: tuning.colors.p2Magenta, white: tuning.colors.ballWhite,
+  yellow: tuning.colors.impactYellow, orange: tuning.colors.specialOrange, lime: tuning.colors.goalLime, violet: tuning.colors.modifierViolet,
+};
+const GLOW_RADII = [16, 24, 32, 48, 64, 96];
+
+class RenderContext {
+  constructor({canvas}){
+    this.canvas = canvas; this.ctx = canvas.getContext("2d");
+    this._dpr = Math.min(window.devicePixelRatio || 1, 2);
+    this._glow = new Map(); this._shake = { amp:0, endsAt:0, total:0 };
+    this._resize();
+    window.addEventListener("resize", () => this._resize());
+    this._buildGlowCache();
+  }
+  _resize(){
+    const aspect = tuning.render.fieldAspect;
+    const wCss = window.innerWidth, hCss = window.innerHeight;
+    let w, h;
+    if(wCss / hCss > aspect){ h = hCss; w = h * aspect; } else { w = wCss; h = w / aspect; }
+    this.canvas.style.width = w + "px"; this.canvas.style.height = h + "px";
+    this.canvas.width  = Math.floor(tuning.field.width  * this._dpr);
+    this.canvas.height = Math.floor(tuning.field.height * this._dpr);
+    this.ctx.setTransform(this._dpr, 0, 0, this._dpr, 0, 0);
+  }
+  _buildGlowCache(){
+    for(const [name, color] of Object.entries(GLOW_COLORS))
+      for(const r of GLOW_RADII){
+        const size = r * 2;
+        const off = document.createElement("canvas"); off.width = size; off.height = size;
+        const c = off.getContext("2d");
+        const g = c.createRadialGradient(r, r, 0, r, r, r);
+        const hex = color.replace("#","");
+        g.addColorStop(0,   "#" + hex + "FF");
+        g.addColorStop(0.4, "#" + hex + "80");
+        g.addColorStop(1,   "#" + hex + "00");
+        c.fillStyle = g; c.fillRect(0, 0, size, size);
+        this._glow.set(name + "-" + r, off);
+      }
+  }
+  glow(ctx, x, y, color, radius){
+    let best = GLOW_RADII[0];
+    for(const r of GLOW_RADII) if(Math.abs(r - radius) < Math.abs(best - radius)) best = r;
+    const s = this._glow.get(color + "-" + best);
+    if(!s) return;
+    const prev = ctx.globalCompositeOperation;
+    ctx.globalCompositeOperation = "lighter";
+    ctx.drawImage(s, x - best, y - best);
+    ctx.globalCompositeOperation = prev;
+  }
+  setShake(amp, durMs){
+    const now = performance.now();
+    if(amp >= this._shake.amp || now >= this._shake.endsAt){
+      this._shake.amp = amp; this._shake.endsAt = now + durMs; this._shake.total = durMs;
+    }
+  }
+  consumeShakeOffset(){
+    const now = performance.now();
+    if(now >= this._shake.endsAt || this._shake.amp <= 0) return [0, 0];
+    const rem = this._shake.endsAt - now;
+    const k = rem / this._shake.total;
+    const a = this._shake.amp * k;
+    return [(Math.random() * 2 - 1) * a, (Math.random() * 2 - 1) * a];
+  }
+  width(){ return tuning.field.width; }
+  height(){ return tuning.field.height; }
+}
+
+// ═══════════════════════════════════════════════════════════
+//  AudioCtx + AudioPlayer (synthesized SFX)
+// ═══════════════════════════════════════════════════════════
+class AudioCtx {
+  constructor(){
+    this._ctx = null; this._master = null; this._handlers = [];
+    const onFirst = () => {
+      if(this._ctx) return;
+      const AC = window.AudioContext || window.webkitAudioContext;
+      if(!AC){ console.warn("Web Audio not supported"); return; }
+      this._ctx = new AC();
+      this._master = this._ctx.createGain();
+      this._master.gain.value = 0.4;
+      this._master.connect(this._ctx.destination);
+      for(const h of this._handlers) h();
+      this._handlers.length = 0;
+    };
+    ["keydown","mousedown","touchstart","pointerdown"].forEach(ev => window.addEventListener(ev, onFirst, {once:true}));
+  }
+  get ctx(){ return this._ctx; }
+  get master(){ return this._master; }
+  get isReady(){ return !!this._ctx; }
+}
+
+class AudioPlayer {
+  constructor({audioCtx, bus}){
+    this._a = audioCtx; this._bus = bus;
+    bus.on("goal-scored", () => this.play("goal"));
+    bus.on("ball-hit-head", ({hitVelocity}) => this.play("hit", {vel:hitVelocity}));
+    bus.on("ball-hit-floor", ({speed}) => { if(speed > 200) this.play("thud", {vel:speed}); });
+    bus.on("ball-hit-wall",  ({speed}) => { if(speed > 200) this.play("thud", {vel:speed}); });
+    bus.on("ball-hit-post", () => this.play("post"));
+    bus.on("p1-jumped", () => this.play("jump"));
+    bus.on("p2-jumped", () => this.play("jump", {detune:80}));
+    bus.on("match-end", () => this.play("whistle"));
+    bus.on("p1-special-fired", () => this.play("post"));
+    bus.on("p2-special-fired", () => this.play("post", {detune:60}));
+  }
+  play(name, opts){
+    opts = opts || {};
+    if(!this._a.isReady) return;
+    const ctx = this._a.ctx, master = this._a.master, now = ctx.currentTime;
+    const osc = (type, f0, f1, dur, peak, detune) => {
+      const o = ctx.createOscillator(); o.type = type;
+      o.frequency.setValueAtTime(f0, now);
+      o.frequency.exponentialRampToValueAtTime(f1, now + dur);
+      if(detune) o.detune.value = detune;
+      const g = ctx.createGain();
+      g.gain.setValueAtTime(0.0001, now);
+      g.gain.exponentialRampToValueAtTime(peak, now + 0.005);
+      g.gain.exponentialRampToValueAtTime(0.0001, now + dur);
+      o.connect(g); g.connect(master); o.start(now); o.stop(now + dur);
+    };
+    if(name === "hit"){
+      const k = Math.min(1, (opts.vel || 600) / 1500);
+      osc("sine", 80, 30, 0.06, 0.6 + 0.4 * k);
+      // noise burst
+      const sr = ctx.sampleRate; const buf = ctx.createBuffer(1, Math.floor(sr * 0.04), sr);
+      const d = buf.getChannelData(0);
+      for(let i=0; i<d.length; i++) d[i] = (Math.random()*2-1) * (1 - i/d.length);
+      const src = ctx.createBufferSource(); src.buffer = buf;
+      const g = ctx.createGain(); g.gain.value = 0.3 + 0.3 * k;
+      src.connect(g); g.connect(master); src.start();
+    } else if(name === "thud"){ osc("triangle", 60, 20, 0.08, 0.5); }
+    else if(name === "post"){ osc("square", 880, 440, 0.25, 0.25, opts.detune); }
+    else if(name === "jump"){ osc("sine", 220, 440, 0.12, 0.18, opts.detune); }
+    else if(name === "whistle"){ osc("square", 1800, 1800, 0.6, 0.15); }
+    else if(name === "goal"){
+      [330, 415, 494, 660].forEach((f, i) => {
+        const t0 = now + i * 0.05;
+        const o = ctx.createOscillator(); o.type = "sawtooth";
+        o.frequency.setValueAtTime(f, t0);
+        const g = ctx.createGain();
+        g.gain.setValueAtTime(0.0001, t0);
+        g.gain.exponentialRampToValueAtTime(0.2, t0 + 0.01);
+        g.gain.exponentialRampToValueAtTime(0.0001, t0 + 0.4);
+        o.connect(g); g.connect(master); o.start(t0); o.stop(t0 + 0.4);
+      });
+    }
+  }
+}
+
+// ═══════════════════════════════════════════════════════════
+//  Physics (semi-implicit Euler + Modifier plugin API)
+// ═══════════════════════════════════════════════════════════
+class Physics {
+  constructor(){ this._entities = new Set(); this._mods = []; }
+  registerEntity(e){ this._entities.add(e); }
+  unregisterEntity(e){ this._entities.delete(e); }
+  registerModifier(m){
+    if(typeof m.onPreIntegrate !== "function" && typeof m.onPostIntegrate !== "function" && typeof m.onCollisionResolve !== "function")
+      throw new Error("Modifier " + m.name + " has no hooks");
+    this._mods.push(m);
+  }
+  unregisterModifier(m){ const i = this._mods.indexOf(m); if(i >= 0) this._mods.splice(i, 1); }
+  getModifiers(){ return this._mods; }
+  step(dt){
+    if(!(dt > 0)) return;
+    const g = tuning.physics.gravity;
+    const fricH = Math.pow(tuning.physics.airFriction, dt);
+    const fricV = Math.pow(tuning.physics.airFrictionVertical, dt);
+    const vMax = tuning.physics.maxVelocity;
+    for(const e of this._entities){
+      for(const m of this._mods) if(m.onPreIntegrate) m.onPreIntegrate(e, dt);
+      e.vy += g * (e.gravityScale != null ? e.gravityScale : 1) * dt;
+      e.vx *= fricH; e.vy *= fricV;
+      if(e.vx >  vMax) e.vx =  vMax; if(e.vx < -vMax) e.vx = -vMax;
+      if(e.vy >  vMax) e.vy =  vMax; if(e.vy < -vMax) e.vy = -vMax;
+      e.prevX = e.x; e.prevY = e.y;
+      e.x += e.vx * dt; e.y += e.vy * dt;
+      for(const m of this._mods) if(m.onPostIntegrate) m.onPostIntegrate(e, dt);
+      if(!Number.isFinite(e.x) || !Number.isFinite(e.y) || !Number.isFinite(e.vx) || !Number.isFinite(e.vy)){
+        console.warn("Entity NaN reset", e); e.vx=0; e.vy=0;
+      }
+    }
+  }
+}
+
+// ═══════════════════════════════════════════════════════════
+//  Collision (circle/AABB + goal-line)
+// ═══════════════════════════════════════════════════════════
+class Collision {
+  constructor({bus}){ this._bus=bus; this._circ=new Set(); this._aabb=new Set(); this._goals=[]; this._goalLockedUntil=0; }
+  registerCircle(e){ this._circ.add(e); }
+  registerAABB(e){ this._aabb.add(e); }
+  registerGoal(g){ this._goals.push(g); }
+  step(){
+    for(const c of this._circ)
+      for(const a of this._aabb){
+        if(!(c.layersMask & a.layer)) continue;
+        this._resolveCAABB(c, a);
+      }
+    const list = [...this._circ];
+    for(let i=0; i<list.length; i++)
+      for(let j=i+1; j<list.length; j++){
+        const a = list[i], b = list[j];
+        if(!(a.layersMask & b.layer)) continue;
+        if(!(b.layersMask & a.layer)) continue;
+        this._resolveCC(a, b);
+      }
+    const now = performance.now();
+    if(now >= this._goalLockedUntil){
+      for(const ball of this._circ){
+        if(ball.layer !== LAYER.BALL) continue;
+        for(const g of this._goals){
+          const inX = g.side === "right" ? (ball.x + ball.radius >= g.x) : (ball.x - ball.radius <= g.x);
+          const inY = (ball.y >= g.yTop && ball.y <= g.yBottom);
+          if(inX && inY){
+            this._goalLockedUntil = now + tuning.collision.goalLockMs;
+            const scorer = ball.lastToucher || g.scoringPlayerId;
+            this._bus.emit("goal-scored", {playerId:scorer, ballEntity:ball});
+            return;
+          }
+        }
+      }
+    }
+  }
+  _resolveCAABB(c, a){
+    const cx = Math.max(a.x, Math.min(c.x, a.x + a.width));
+    const cy = Math.max(a.y, Math.min(c.y, a.y + a.height));
+    const dx = c.x - cx, dy = c.y - cy;
+    const distSq = dx*dx + dy*dy;
+    if(distSq >= c.radius*c.radius) return;
+    const dist = Math.sqrt(distSq) || 0.0001;
+    const nx = dx/dist, ny = dy/dist;
+    const overlap = c.radius - dist;
+    let e = 0.5;
+    if(c.layer === LAYER.BALL){
+      if(a.layer === LAYER.FLOOR) e = tuning.collision.restitutionBallFloor;
+      else if(a.layer === LAYER.WALL) e = tuning.collision.restitutionBallWall;
+      else if(a.layer === LAYER.POST) e = tuning.collision.restitutionBallPost;
+    }
+    const vN = c.vx * nx + c.vy * ny;
+    if(vN < 0){ c.vx -= (1+e)*vN*nx; c.vy -= (1+e)*vN*ny; }
+    const corr = Math.max(overlap - tuning.collision.penetrationSlop, 0) * tuning.collision.correctionPercent;
+    c.x += corr * nx; c.y += corr * ny;
+    if(c.layer === LAYER.BALL){
+      const sp = Math.hypot(c.vx, c.vy);
+      if(a.layer === LAYER.FLOOR) this._bus.emit("ball-hit-floor", {speed:sp});
+      if(a.layer === LAYER.WALL)  this._bus.emit("ball-hit-wall",  {speed:sp});
+      if(a.layer === LAYER.POST)  this._bus.emit("ball-hit-post",  {speed:sp});
+    }
+  }
+  _resolveCC(A, B){
+    const dx = B.x - A.x, dy = B.y - A.y;
+    const sumR = A.radius + B.radius;
+    const distSq = dx*dx + dy*dy;
+    if(distSq >= sumR*sumR) return;
+    const dist = Math.sqrt(distSq) || 0.0001;
+    const nx = dx/dist, ny = dy/dist;
+    const overlap = sumR - dist;
+    const vRel = (B.vx - A.vx) * nx + (B.vy - A.vy) * ny;
+    if(vRel >= 0) return;
+    const e = Math.min(
+      (A.restitution != null ? A.restitution : tuning.collision.restitutionHeadBall),
+      (B.restitution != null ? B.restitution : tuning.collision.restitutionHeadBall)
+    );
+    const invA = 1/A.mass, invB = 1/B.mass;
+    let j = -(1 + e) * vRel / (invA + invB);
+    if(A.physics){
+      for(const m of A.physics.getModifiers()){
+        if(m.onCollisionResolve){
+          const out = m.onCollisionResolve({A, B, nx, ny, overlap, j});
+          if(typeof out === "number") j = out;
+        }
+      }
+    }
+    A.vx -= j * invA * nx; A.vy -= j * invA * ny;
+    B.vx += j * invB * nx; B.vy += j * invB * ny;
+    const corr = Math.max(overlap - tuning.collision.penetrationSlop, 0) * tuning.collision.correctionPercent;
+    const tot = invA + invB;
+    A.x -= (corr * invA / tot) * nx; A.y -= (corr * invA / tot) * ny;
+    B.x += (corr * invB / tot) * nx; B.y += (corr * invB / tot) * ny;
+    const ball = A.layer === LAYER.BALL ? A : B.layer === LAYER.BALL ? B : null;
+    const head = A.layer === LAYER.HEAD ? A : B.layer === LAYER.HEAD ? B : null;
+    if(ball && head){
+      ball.lastToucher = head.playerId;
+      this._bus.emit("ball-hit-head", {playerId:head.playerId, hitVelocity:Math.abs(vRel)});
+    }
+  }
+}
+
+// ═══════════════════════════════════════════════════════════
+//  MatchState
+// ═══════════════════════════════════════════════════════════
+class MatchState {
+  constructor({bus}){
+    this._bus = bus;
+    this.phase = PHASE.MENU;
+    this.scores = { p1:0, p2:0 };
+    this.timeRemaining = tuning.match.durationSec;
+    this.selection = { p1:"spark", p2:"jumpy", modifier:"none" };
+    this._goalPauseUntil = 0;
+    this._countdownUntil = 0;
+    this.countdownValue = 0;
+    bus.on("goal-scored", ({playerId}) => this._onGoal(playerId));
+  }
+  goto(phase){
+    if(this.phase === phase) return;
+    const from = this.phase; this.phase = phase;
+    this._bus.emit("phase-changed", {from, to:phase});
+    if(phase === PHASE.COUNTDOWN){
+      this.timeRemaining = tuning.match.durationSec;
+      this.scores.p1 = 0; this.scores.p2 = 0;
+      this._countdownUntil = performance.now() + tuning.match.countdownMs;
+    } else if(phase === PHASE.MENU){
+      this.timeRemaining = tuning.match.durationSec;
+      this.scores.p1 = 0; this.scores.p2 = 0;
+    }
+  }
+  setSelection(s){
+    if(s.p1) this.selection.p1 = s.p1;
+    if(s.p2) this.selection.p2 = s.p2;
+    if(s.modifier) this.selection.modifier = s.modifier;
+    this._bus.emit("selection-changed", Object.assign({}, this.selection));
+  }
+  _onGoal(playerId){
+    if(this.phase !== PHASE.PLAYING) return;
+    this.scores[playerId]++;
+    this._bus.emit("score-changed", Object.assign({}, this.scores));
+    this.phase = PHASE.GOAL_PAUSE;
+    this._goalPauseUntil = performance.now() + tuning.collision.goalLockMs;
+  }
+  tick(dt){
+    const now = performance.now();
+    if(this.phase === PHASE.COUNTDOWN){
+      const rem = this._countdownUntil - now;
+      this.countdownValue = Math.max(0, Math.ceil(rem / 1000));
+      if(rem <= 0) this.goto(PHASE.PLAYING);
+    } else if(this.phase === PHASE.PLAYING){
+      this.timeRemaining = Math.max(0, this.timeRemaining - dt);
+      if(this.timeRemaining === 0){
+        this.goto(PHASE.RESULT);
+        this._bus.emit("match-end", Object.assign({}, this.scores));
+      }
+    } else if(this.phase === PHASE.GOAL_PAUSE){
+      if(now >= this._goalPauseUntil){
+        this._bus.emit("ball-reset-requested");
+        this.phase = PHASE.PLAYING;
+      }
+    }
+  }
+  get winner(){
+    if(this.scores.p1 > this.scores.p2) return "p1";
+    if(this.scores.p2 > this.scores.p1) return "p2";
+    return null;
+  }
+}
+
+// ═══════════════════════════════════════════════════════════
+//  PlayerCharacter
+// ═══════════════════════════════════════════════════════════
+class PlayerCharacter {
+  constructor({id, spawnX, spawnY, color, physics, collision, bus, mouthShape}){
+    this.id = id; this.color = color; this.mouthShape = mouthShape || "smile";
+    this._spawnX = spawnX; this._spawnY = spawnY;
+    this._bus = bus;
+    this.zOrder = 15; this.visible = true;
+    this.x = spawnX; this.y = spawnY; this.prevX = spawnX; this.prevY = spawnY;
+    this.vx = 0; this.vy = 0;
+    this.mass = tuning.player.mass; this.gravityScale = 1;
+    this.radius = tuning.player.headRadius;
+    this.layer = LAYER.HEAD;
+    this.layersMask = LAYER.WALL | LAYER.FLOOR | LAYER.POST | LAYER.BALL;
+    this.restitution = 0.2; this.playerId = id; this.physics = physics;
+    this._isGrounded = false; this._wasGrounded = false;
+    this._lastGroundedAt = -Infinity; this._jumpBufferedAt = -Infinity;
+    this._intentLeft = false; this._intentRight = false;
+    this.facing = 1; this.specialCooldownEndsAt = 0;
+    this.specialType = null; this._renderCtx = null;
+    physics.registerEntity(this); collision.registerCircle(this);
+    bus.on(id+"-move-left-pressed",   () => { this._intentLeft = true; this.facing = -1; });
+    bus.on(id+"-move-left-released",  () => { this._intentLeft = false; });
+    bus.on(id+"-move-right-pressed",  () => { this._intentRight = true; this.facing = 1; });
+    bus.on(id+"-move-right-released", () => { this._intentRight = false; });
+    bus.on(id+"-jump-pressed",        () => { this._jumpBufferedAt = performance.now(); });
+    bus.on(id+"-jump-released",       () => { if(this.vy < 0) this.vy *= tuning.player.jumpCutFactor; });
+  }
+  update(dt){
+    if(dt > 0.05) dt = 0.05;
+    const floorY = tuning.field.floorY - this.radius;
+    this._wasGrounded = this._isGrounded;
+    this._isGrounded = (this.y >= floorY - 0.5) && this.vy >= -0.001;
+    if(this._isGrounded && !this._wasGrounded) this._bus.emit(this.id+"-landed", {vy:this.vy});
+    if(this._isGrounded) this._lastGroundedAt = performance.now();
+    const intent = (this._intentRight ? 1 : 0) - (this._intentLeft ? 1 : 0);
+    const want = intent * tuning.player.maxRunSpeed;
+    const dV = want - this.vx;
+    const mD = tuning.player.acceleration * dt;
+    this.vx += Math.max(-mD, Math.min(mD, dV));
+    if(intent === 0 && this._isGrounded) this.vx *= Math.pow(tuning.player.groundFriction, dt);
+    const now = performance.now();
+    const buf = (now - this._jumpBufferedAt) < tuning.player.jumpBufferMs;
+    const coy = (now - this._lastGroundedAt) < tuning.player.coyoteMs;
+    if(buf && (this._isGrounded || coy)){
+      this.vy = -tuning.player.jumpVelocity;
+      this._isGrounded = false; this._jumpBufferedAt = -Infinity;
+      this._bus.emit(this.id+"-jumped");
+    }
+    if(this.y > tuning.field.height + 500 || this.x < -500 || this.x > tuning.field.width + 500){
+      this.x = this._spawnX; this.y = this._spawnY; this.vx = 0; this.vy = 0;
+    }
+  }
+  draw(ctx, t, alpha){
+    const rx = tuning.render.interpolationEnabled ? (this.prevX + (this.x - this.prevX) * alpha) : this.x;
+    const ry = tuning.render.interpolationEnabled ? (this.prevY + (this.y - this.prevY) * alpha) : this.y;
+    const gn = this.id === "p1" ? "cyan" : "magenta";
+    if(this._renderCtx) this._renderCtx.glow(ctx, rx, ry, gn, this.radius);
+    ctx.fillStyle = this.color;
+    ctx.beginPath(); ctx.arc(rx, ry, this.radius, 0, Math.PI*2); ctx.fill();
+    ctx.fillStyle = "#000";
+    const eyeY = ry - this.radius * 0.15;
+    const eyeOff = this.radius * 0.35 * this.facing;
+    const eyeR = this.radius * 0.12;
+    ctx.beginPath(); ctx.arc(rx - eyeOff*0.4, eyeY, eyeR, 0, Math.PI*2); ctx.fill();
+    ctx.beginPath(); ctx.arc(rx + eyeOff,     eyeY, eyeR, 0, Math.PI*2); ctx.fill();
+    ctx.strokeStyle = "#000"; ctx.lineWidth = 3;
+    ctx.beginPath();
+    const my = ry + this.radius * 0.35;
+    if(this.mouthShape === "smile") ctx.arc(rx, my - 4, this.radius * 0.4, 0.2*Math.PI, 0.8*Math.PI);
+    else { ctx.moveTo(rx - this.radius*0.3, my); ctx.lineTo(rx + this.radius*0.3, my); }
+    ctx.stroke();
+    ctx.strokeStyle = this.color; ctx.lineWidth = 2;
+    ctx.beginPath();
+    ctx.ellipse(rx, tuning.field.floorY - 2, this.radius * 0.9, 4, 0, 0, Math.PI*2);
+    if(this.id === "p1") ctx.stroke();
+    else { ctx.setLineDash([4,4]); ctx.stroke(); ctx.setLineDash([]); }
+  }
+  setRenderContext(rc){ this._renderCtx = rc; }
+}
+
+// ═══════════════════════════════════════════════════════════
+//  Ball
+// ═══════════════════════════════════════════════════════════
+class Ball {
+  constructor({x, y, physics, collision, bus}){
+    this._bus = bus;
+    this.zOrder = 16; this.visible = true;
+    this.x = x; this.y = y; this.prevX = x; this.prevY = y;
+    this.vx = 0; this.vy = 0;
+    this.mass = tuning.ball.mass; this.gravityScale = tuning.ball.gravityScale;
+    this.radius = tuning.ball.radius;
+    this.layer = LAYER.BALL;
+    this.layersMask = LAYER.HEAD | LAYER.WALL | LAYER.FLOOR | LAYER.POST;
+    this.restitution = tuning.collision.restitutionHeadBall;
+    this.lastToucher = null; this.spinFake = 0;
+    this.physics = physics; this._renderCtx = null;
+    physics.registerEntity(this); collision.registerCircle(this);
+    bus.on("ball-reset-requested", () => this.reset());
+  }
+  update(dt){ this.spinFake += this.vx * tuning.ball.spinScale * dt; }
+  reset(){
+    this.x = tuning.field.centerX;
+    this.y = tuning.field.centerY - tuning.ball.spawnHeightOffset;
+    this.prevX = this.x; this.prevY = this.y;
+    this.vx = 0; this.vy = 0; this.lastToucher = null; this.spinFake = 0;
+    this._bus.emit("ball-reset");
+  }
+  draw(ctx, t, alpha){
+    const rx = tuning.render.interpolationEnabled ? (this.prevX + (this.x - this.prevX) * alpha) : this.x;
+    const ry = tuning.render.interpolationEnabled ? (this.prevY + (this.y - this.prevY) * alpha) : this.y;
+    const gn = this.lastToucher === "p1" ? "cyan" : this.lastToucher === "p2" ? "magenta" : "white";
+    if(this._renderCtx) this._renderCtx.glow(ctx, rx, ry, gn, this.radius * 1.6);
+    ctx.fillStyle = tuning.colors.ballWhite;
+    ctx.beginPath(); ctx.arc(rx, ry, this.radius, 0, Math.PI*2); ctx.fill();
+    ctx.strokeStyle = "#222"; ctx.lineWidth = 2;
+    ctx.save(); ctx.translate(rx, ry); ctx.rotate(this.spinFake);
+    ctx.beginPath(); ctx.moveTo(-this.radius*0.7, 0); ctx.lineTo(this.radius*0.7, 0); ctx.stroke();
+    ctx.restore();
+  }
+  setRenderContext(rc){ this._renderCtx = rc; }
+}
+
+// ═══════════════════════════════════════════════════════════
+//  JuiceController
+// ═══════════════════════════════════════════════════════════
+class JuiceController {
+  constructor({bus, loop, ctxWrap}){
+    bus.on("goal-scored", () => {
+      loop.pulseHitstop(tuning.juice.goalHitstopMs);
+      setTimeout(() => loop.setTimeScale(tuning.juice.slowmoTarget, tuning.juice.goalSlowmoMs), tuning.juice.goalHitstopMs);
+      ctxWrap.setShake(tuning.juice.goalShakePx, tuning.juice.goalShakeMs);
+    });
+    bus.on("ball-hit-head", ({hitVelocity}) => {
+      const k = Math.min(1, (hitVelocity || 0) / 1500);
+      const sh = tuning.juice.hitShakeMinPx + (tuning.juice.hitShakeMaxPx - tuning.juice.hitShakeMinPx) * k;
+      ctxWrap.setShake(sh, tuning.juice.hitShakeMs);
+    });
+    bus.on("ball-hit-post", () => ctxWrap.setShake(tuning.juice.postShakePx, tuning.juice.postShakeMs));
+  }
+}
+
+// ═══════════════════════════════════════════════════════════
+//  ParticleSystem (pool capped at 50)
+// ═══════════════════════════════════════════════════════════
+const MAX_P = 50;
+class ParticleSystem {
+  constructor({bus}){
+    this._bus = bus; this.zOrder = 25; this.visible = true; this._renderCtx = null;
+    this._x = new Float32Array(MAX_P); this._y = new Float32Array(MAX_P);
+    this._vx = new Float32Array(MAX_P); this._vy = new Float32Array(MAX_P);
+    this._life = new Float32Array(MAX_P); this._maxLife = new Float32Array(MAX_P);
+    this._r = new Float32Array(MAX_P); this._color = new Array(MAX_P);
+    this._active = new Uint8Array(MAX_P); this._lastHit = {x:0, y:0};
+    bus.on("ball-hit-head", ({playerId, hitVelocity}) => {
+      const c = playerId === "p1" ? "cyan" : "magenta";
+      const n = Math.min(8, 3 + Math.floor((hitVelocity || 600) / 200));
+      this._spawnBurst(this._lastHit.x, this._lastHit.y, c, n, 220);
+    });
+    bus.on("goal-scored", () => this._spawnBurst(tuning.field.centerX, tuning.field.centerY, "lime", 20, 350));
+  }
+  noteBallPosition(x, y){ this._lastHit.x = x; this._lastHit.y = y; }
+  setRenderContext(rc){ this._renderCtx = rc; }
+  _spawnBurst(x, y, color, n, speed){ for(let i=0; i<n; i++) this._spawnOne(x, y, color, speed); }
+  _spawnOne(x, y, color, speed){
+    let idx = -1;
+    for(let i=0; i<MAX_P; i++) if(!this._active[i]){ idx = i; break; }
+    if(idx === -1){
+      let min = Infinity, mi = 0;
+      for(let i=0; i<MAX_P; i++) if(this._life[i] < min){ min = this._life[i]; mi = i; }
+      idx = mi;
+    }
+    const ang = Math.random() * Math.PI * 2;
+    const v = speed * (0.5 + Math.random() * 0.5);
+    this._x[idx] = x; this._y[idx] = y;
+    this._vx[idx] = Math.cos(ang) * v; this._vy[idx] = Math.sin(ang) * v;
+    const life = 0.35 + Math.random() * 0.35;
+    this._life[idx] = life; this._maxLife[idx] = life;
+    this._r[idx] = 2 + Math.random() * 4; this._color[idx] = color;
+    this._active[idx] = 1;
+  }
+  update(dt){
+    for(let i=0; i<MAX_P; i++){
+      if(!this._active[i]) continue;
+      this._life[i] -= dt;
+      if(this._life[i] <= 0){ this._active[i] = 0; continue; }
+      this._x[i] += this._vx[i] * dt; this._y[i] += this._vy[i] * dt;
+      this._vx[i] *= 0.95; this._vy[i] = this._vy[i] * 0.95 + 600 * dt;
+    }
+  }
+  draw(ctx){
+    const cm = { cyan:tuning.colors.p1Cyan, magenta:tuning.colors.p2Magenta, white:tuning.colors.ballWhite, lime:tuning.colors.goalLime, yellow:tuning.colors.impactYellow, orange:tuning.colors.specialOrange };
+    const prev = ctx.globalCompositeOperation;
+    ctx.globalCompositeOperation = "lighter";
+    for(let i=0; i<MAX_P; i++){
+      if(!this._active[i]) continue;
+      const k = this._life[i] / this._maxLife[i];
+      ctx.fillStyle = cm[this._color[i]] || "#fff";
+      ctx.globalAlpha = k;
+      ctx.beginPath();
+      ctx.arc(this._x[i], this._y[i], this._r[i] * (0.5 + k * 0.5), 0, Math.PI*2);
+      ctx.fill();
+    }
+    ctx.globalAlpha = 1;
+    ctx.globalCompositeOperation = prev;
+  }
+}
+
+// ═══════════════════════════════════════════════════════════
+//  ModifierSystem
+// ═══════════════════════════════════════════════════════════
+class ModifierSystem {
+  constructor({physics, collision, ball, bus}){
+    this._physics = physics; this._collision = collision; this._ball = ball; this._bus = bus;
+    this._active = null;
+    this._origBallRadius = tuning.ball.radius; this._origGoalTop = null;
+  }
+  setActive(id){
+    if(this._active) this.clear();
+    if(!id || id === "none"){ this._active = null; return; }
+    const def = MODIFIERS.find(m => m.id === id);
+    if(!def) return;
+    this._active = {id, def};
+    this._apply(id);
+    this._bus.emit("modifier-applied", {id, name:def.name});
+  }
+  clear(){
+    if(!this._active) return;
+    this._unapply(this._active.id); this._active = null;
+    this._bus.emit("modifier-cleared");
+  }
+  _apply(id){
+    if(id === "low-gravity"){
+      const plug = { name:"low-gravity", onPreIntegrate:(e) => { e.gravityScale = 0.35; } };
+      this._active.plugin = plug; this._physics.registerModifier(plug);
+    } else if(id === "giant-ball"){
+      this._origBallRadius = this._ball.radius; this._ball.radius = this._origBallRadius * 2;
+    } else if(id === "tiny-goal"){
+      const sh = tuning.field.goalHeight * 0.4;
+      for(const g of this._collision._goals){
+        if(this._origGoalTop === null) this._origGoalTop = g.yTop;
+        g.yTop = g.yTop + sh;
+      }
+    }
+  }
+  _unapply(id){
+    if(id === "low-gravity"){ if(this._active.plugin) this._physics.unregisterModifier(this._active.plugin); }
+    else if(id === "giant-ball"){ this._ball.radius = this._origBallRadius; }
+    else if(id === "tiny-goal"){
+      if(this._origGoalTop !== null){
+        for(const g of this._collision._goals) g.yTop = this._origGoalTop;
+        this._origGoalTop = null;
+      }
+    }
+  }
+}
+
+// ═══════════════════════════════════════════════════════════
+//  Specials
+// ═══════════════════════════════════════════════════════════
+function tryFireSpecial(player, ball, bus){
+  const now = performance.now();
+  if(now < (player.specialCooldownEndsAt || 0)) return false;
+  const fired = applySpecial(player.specialType, player, ball, bus);
+  if(fired){
+    player.specialCooldownEndsAt = now + tuning.player.specialCooldownMs;
+    bus.emit(player.id+"-special-fired", {specialType:player.specialType});
+  }
+  return fired;
+}
+function applySpecial(type, player, ball, bus){
+  if(type === "fire-impulse"){
+    const dx = ball.x - player.x, dy = ball.y - player.y;
+    const dist = Math.hypot(dx, dy);
+    if(dist > tuning.special.fireImpulseRange) return false;
+    const dirX = (player.facing != null ? player.facing : Math.sign(dx)) || 1;
+    ball.vx = dirX * tuning.special.fireImpulseVx;
+    ball.vy = -tuning.special.fireImpulseVy;
+    ball.lastToucher = player.id;
+    bus.emit("special-vfx", {x:player.x + dirX*40, y:player.y, color:"orange"});
+    return true;
+  } else if(type === "mega-jump"){
+    player.vy = -tuning.special.megaJumpVelocity;
+    player._isGrounded = false;
+    bus.emit("special-vfx", {x:player.x, y:player.y + player.radius, color:"lime"});
+    return true;
+  } else if(type === "freeze-dash"){
+    const dir = player.facing || 1;
+    player.vx = dir * tuning.special.freezeDashVx;
+    player.vy = Math.min(player.vy, -100);
+    bus.emit("special-vfx", {x:player.x, y:player.y, color:"magenta"});
+    return true;
+  } else if(type === "magnet-pull"){
+    const dx = player.x - ball.x, dy = (player.y - 6) - ball.y;
+    const dist = Math.hypot(dx, dy) || 1;
+    if(dist > tuning.special.magnetPullRange) return false;
+    const k = tuning.special.magnetPullImpulse / dist;
+    ball.vx += dx * k * 0.02; ball.vy += dy * k * 0.02;
+    bus.emit("special-vfx", {x:ball.x, y:ball.y, color:"yellow"});
+    return true;
+  }
+  return false;
+}
+
+// ═══════════════════════════════════════════════════════════
+//  Renderer
+// ═══════════════════════════════════════════════════════════
+class Renderer {
+  constructor({ctxWrap, bus}){
+    this._ctxWrap = ctxWrap; this._bus = bus;
+    this._drawables = []; this._dirty = false; this._goalFlashEndAt = 0;
+    bus.on("goal-scored", () => { this._goalFlashEndAt = performance.now() + tuning.render.goalFlashDurationMs; });
+  }
+  register(d){
+    if(typeof d.draw !== "function") throw new Error("Drawable missing draw()");
+    if(typeof d.zOrder !== "number") d.zOrder = 10;
+    if(typeof d.setRenderContext === "function") d.setRenderContext(this._ctxWrap);
+    this._drawables.push(d); this._dirty = true;
+  }
+  render(alpha, t){
+    const ctx = this._ctxWrap.ctx;
+    const w = this._ctxWrap.width(), h = this._ctxWrap.height();
+    if(this._dirty){ this._drawables.sort((a, b) => a.zOrder - b.zOrder); this._dirty = false; }
+    ctx.fillStyle = tuning.render.bgBlack; ctx.fillRect(0, 0, w, h);
+    const [sx, sy] = this._ctxWrap.consumeShakeOffset();
+    if(sx !== 0 || sy !== 0) ctx.translate(sx, sy);
+    ctx.strokeStyle = tuning.colors.fieldLine; ctx.lineWidth = 2;
+    ctx.beginPath();
+    ctx.moveTo(w/2, 0); ctx.lineTo(w/2, tuning.field.floorY);
+    ctx.moveTo(0, tuning.field.floorY); ctx.lineTo(w, tuning.field.floorY);
+    ctx.stroke();
+    for(const d of this._drawables){
+      if(d.visible === false) continue;
+      ctx.save();
+      try { d.draw(ctx, t, alpha); }
+      catch(err){ console.error("Drawable error", d, err); }
+      ctx.restore();
+    }
+    if(sx !== 0 || sy !== 0) ctx.translate(-sx, -sy);
+    const now = performance.now();
+    if(now < this._goalFlashEndAt){
+      const k = Math.max(0, (this._goalFlashEndAt - now) / tuning.render.goalFlashDurationMs);
+      const a = k * tuning.render.goalFlashMaxAlpha;
+      ctx.fillStyle = "rgba(166, 255, 0, " + a.toFixed(3) + ")";
+      ctx.fillRect(0, 0, w, h);
+    }
+  }
+}
+
+// ═══════════════════════════════════════════════════════════
+//  HUD
+// ═══════════════════════════════════════════════════════════
+class HUD {
+  constructor({matchState, p1, p2}){ this._ms = matchState; this._p1 = p1; this._p2 = p2; this.zOrder = 45; }
+  get visible(){ const p = this._ms.phase; return p === PHASE.PLAYING || p === PHASE.GOAL_PAUSE || p === PHASE.COUNTDOWN; }
+  draw(ctx, t){
+    const w = tuning.field.width, h = tuning.field.height, ms = this._ms;
+    ctx.font = 'bold 56px ui-monospace, "JetBrains Mono", monospace';
+    ctx.textBaseline = "top";
+    ctx.fillStyle = tuning.colors.p1Cyan; ctx.textAlign = "right";
+    ctx.fillText(String(ms.scores.p1), w/2 - 90, 24);
+    const tSec = Math.ceil(ms.timeRemaining);
+    ctx.fillStyle = (tSec <= 10 && ms.phase === PHASE.PLAYING && Math.floor(t/250) % 2 === 0) ? tuning.colors.impactYellow : tuning.colors.uiText;
+    ctx.textAlign = "center"; ctx.fillText(String(tSec).padStart(2,"0"), w/2, 24);
+    ctx.fillStyle = tuning.colors.p2Magenta; ctx.textAlign = "left";
+    ctx.fillText(String(ms.scores.p2), w/2 + 90, 24);
+    // names
+    ctx.font = 'bold 18px "Space Grotesk", system-ui, sans-serif';
+    ctx.fillStyle = tuning.colors.uiTextDim;
+    ctx.textAlign = "right"; ctx.fillText(getCharacterById(ms.selection.p1).name, w/2 - 230, 36);
+    ctx.textAlign = "left";  ctx.fillText(getCharacterById(ms.selection.p2).name, w/2 + 230, 36);
+    // modifier
+    const mod = MODIFIERS.find(m => m.id === ms.selection.modifier);
+    if(mod && mod.id !== "none"){
+      ctx.font = 'bold 14px "Space Grotesk", system-ui, sans-serif';
+      ctx.fillStyle = tuning.colors.modifierViolet; ctx.textAlign = "center";
+      ctx.fillText(mod.emoji + " " + mod.name, w/2, 92);
+    }
+    // special cooldown bars
+    this._cdBar(ctx, this._p1, 24,      h - 40, 200, "right", tuning.colors.p1Cyan);
+    this._cdBar(ctx, this._p2, w - 24,  h - 40, 200, "left",  tuning.colors.p2Magenta);
+    // phase prompts
+    if(ms.phase === PHASE.GOAL_PAUSE){
+      ctx.fillStyle = tuning.colors.goalLime;
+      ctx.font = 'bold 96px "Space Grotesk", system-ui, sans-serif';
+      ctx.textAlign = "center"; ctx.textBaseline = "middle";
+      ctx.fillText("¡GOL!", w/2, h/2 - 60);
+    } else if(ms.phase === PHASE.COUNTDOWN){
+      ctx.fillStyle = tuning.colors.uiText;
+      ctx.font = 'bold 160px "Space Grotesk", system-ui, sans-serif';
+      ctx.textAlign = "center"; ctx.textBaseline = "middle";
+      const v = ms.countdownValue;
+      ctx.fillText(v > 0 ? String(v) : "¡VA!", w/2, h/2);
+    }
+  }
+  _cdBar(ctx, p, x, y, width, align, color){
+    if(!p) return;
+    const now = performance.now();
+    const rem = Math.max(0, (p.specialCooldownEndsAt || 0) - now);
+    const total = tuning.player.specialCooldownMs;
+    const ready = rem <= 0;
+    const fill = ready ? 1 : (1 - rem / total);
+    const bx = align === "right" ? x : (x - width);
+    ctx.fillStyle = "rgba(255,255,255,0.08)"; ctx.fillRect(bx, y, width, 8);
+    ctx.fillStyle = ready ? tuning.colors.goalLime : color;
+    ctx.fillRect(bx, y, width * fill, 8);
+    ctx.font = 'bold 12px "Space Grotesk", system-ui, sans-serif';
+    ctx.fillStyle = ready ? tuning.colors.goalLime : tuning.colors.uiTextDim;
+    ctx.textAlign = align; ctx.textBaseline = "bottom";
+    ctx.fillText(ready ? "⚡ SPECIAL LISTO" : "special…", align === "right" ? (bx + width) : bx, y - 4);
+  }
+}
+
+// ═══════════════════════════════════════════════════════════
+//  MainMenu / CharacterSelect / ResultScreen
+// ═══════════════════════════════════════════════════════════
+class MainMenu {
+  constructor({matchState}){ this._ms = matchState; this.zOrder = 48; }
+  get visible(){ return this._ms.phase === PHASE.MENU; }
+  draw(ctx, t){
+    const w = tuning.field.width, h = tuning.field.height;
+    ctx.fillStyle = "rgba(0,0,0,0.55)"; ctx.fillRect(0, 0, w, h);
+    ctx.textAlign = "center"; ctx.textBaseline = "middle";
+    const title = "MEGA HEAD CUP";
+    ctx.font = 'bold 88px "Space Grotesk", system-ui, sans-serif';
+    ctx.fillStyle = tuning.colors.p1Cyan;    ctx.fillText(title, w/2 - 4, h/2 - 80);
+    ctx.fillStyle = tuning.colors.p2Magenta; ctx.fillText(title, w/2 + 4, h/2 - 80);
+    ctx.fillStyle = tuning.colors.uiText;    ctx.fillText(title, w/2, h/2 - 80);
+    ctx.font = '20px "Space Grotesk", system-ui, sans-serif';
+    ctx.fillStyle = tuning.colors.uiTextDim;
+    ctx.fillText("1v1 local · arcade soccer · pique de sofá", w/2, h/2 - 24);
+    const k = 0.5 + 0.5 * Math.sin(t/350);
+    ctx.font = 'bold 28px "Space Grotesk", system-ui, sans-serif';
+    ctx.fillStyle = "rgba(232,241,255," + (0.4 + 0.6*k).toFixed(2) + ")";
+    ctx.fillText("PRESIONA CUALQUIER TECLA", w/2, h/2 + 60);
+    ctx.font = '14px "Space Grotesk", system-ui, sans-serif';
+    ctx.fillStyle = tuning.colors.uiTextDim;
+    ctx.fillText("P1: A D mover · W saltar · G special", w/2, h - 60);
+    ctx.fillText("P2: ← → mover · ↑ saltar · , special", w/2, h - 40);
+  }
+}
+
+class CharacterSelect {
+  constructor({matchState, bus}){
+    this._ms = matchState; this._bus = bus; this.zOrder = 49;
+    this._cursor = {p1:0, p2:1}; this._confirmed = {p1:false, p2:false};
+    this._rouletteStart = 0; this._rouletteFinal = null; this._rouletteCur = null;
+    bus.on("p1-move-left-pressed",  () => this._move("p1", -1));
+    bus.on("p1-move-right-pressed", () => this._move("p1", +1));
+    bus.on("p2-move-left-pressed",  () => this._move("p2", -1));
+    bus.on("p2-move-right-pressed", () => this._move("p2", +1));
+    bus.on("p1-jump-pressed",       () => this._confirm("p1"));
+    bus.on("p2-jump-pressed",       () => this._confirm("p2"));
+  }
+  get visible(){ return this._ms.phase === PHASE.CHAR_SELECT; }
+  enter(){
+    this._cursor.p1 = 0; this._cursor.p2 = 1;
+    this._confirmed.p1 = false; this._confirmed.p2 = false;
+    this._rouletteStart = performance.now();
+    this._rouletteFinal = pickRandomModifier(); this._rouletteCur = null;
+  }
+  _move(pid, dir){
+    if(this._ms.phase !== PHASE.CHAR_SELECT) return;
+    if(this._confirmed[pid]) return;
+    const n = CHARACTERS.length;
+    this._cursor[pid] = (this._cursor[pid] + dir + n) % n;
+  }
+  _confirm(pid){
+    if(this._ms.phase !== PHASE.CHAR_SELECT) return;
+    if(this._confirmed[pid]) return;
+    this._confirmed[pid] = true;
+    const sel = {}; sel[pid] = CHARACTERS[this._cursor[pid]].id;
+    this._ms.setSelection(sel);
+    if(this._confirmed.p1 && this._confirmed.p2){
+      this._ms.setSelection({modifier:this._rouletteFinal});
+      this._bus.emit("selections-finalized", {p1:this._ms.selection.p1, p2:this._ms.selection.p2, modifier:this._rouletteFinal});
+    }
+  }
+  draw(ctx, t){
+    const w = tuning.field.width, h = tuning.field.height;
+    ctx.fillStyle = "rgba(0,0,0,0.7)"; ctx.fillRect(0, 0, w, h);
+    ctx.font = 'bold 40px "Space Grotesk", system-ui, sans-serif';
+    ctx.textAlign = "center"; ctx.textBaseline = "middle";
+    ctx.fillStyle = tuning.colors.uiText;
+    ctx.fillText("ELIGE TU CABEZÓN", w/2, 60);
+    this._col(ctx, "p1", w * 0.25, h * 0.5, t);
+    this._col(ctx, "p2", w * 0.75, h * 0.5, t);
+    this._updateRoul(t);
+    this._drawRoul(ctx, w/2, h - 130);
+    ctx.font = '14px "Space Grotesk", system-ui, sans-serif';
+    ctx.fillStyle = tuning.colors.uiTextDim; ctx.textAlign = "center";
+    ctx.fillText("← → para escoger · ↑ / W para confirmar", w/2, h - 30);
+  }
+  _col(ctx, pid, cx, cy, t){
+    const accent = pid === "p1" ? tuning.colors.p1Cyan : tuning.colors.p2Magenta;
+    const ch = CHARACTERS[this._cursor[pid]];
+    const confirmed = this._confirmed[pid];
+    ctx.font = 'bold 22px "Space Grotesk", system-ui, sans-serif';
+    ctx.fillStyle = accent; ctx.textAlign = "center";
+    ctx.fillText(pid.toUpperCase(), cx, cy - 170);
+    ctx.fillStyle = accent;
+    ctx.beginPath(); ctx.arc(cx, cy - 70, 48, 0, Math.PI*2); ctx.fill();
+    ctx.fillStyle = "#000";
+    ctx.beginPath(); ctx.arc(cx - 16, cy - 78, 6, 0, Math.PI*2); ctx.fill();
+    ctx.beginPath(); ctx.arc(cx + 16, cy - 78, 6, 0, Math.PI*2); ctx.fill();
+    ctx.strokeStyle = "#000"; ctx.lineWidth = 3; ctx.beginPath();
+    if(ch.mouthShape === "smile") ctx.arc(cx, cy - 60, 18, 0.2*Math.PI, 0.8*Math.PI);
+    else { ctx.moveTo(cx - 16, cy - 50); ctx.lineTo(cx + 16, cy - 50); }
+    ctx.stroke();
+    ctx.font = 'bold 28px "Space Grotesk", system-ui, sans-serif';
+    ctx.fillStyle = tuning.colors.uiText; ctx.fillText(ch.name, cx, cy + 10);
+    ctx.font = '16px "Space Grotesk", system-ui, sans-serif';
+    ctx.fillStyle = tuning.colors.uiTextDim;
+    ctx.fillText("special · " + ch.specialName, cx, cy + 40);
+    if(!confirmed){
+      const pulse = 0.5 + 0.5 * Math.sin(t/250);
+      ctx.font = 'bold 32px "Space Grotesk", system-ui, sans-serif';
+      ctx.fillStyle = "rgba(232,241,255," + (0.3 + 0.6*pulse).toFixed(2) + ")";
+      ctx.fillText("‹    ›", cx, cy + 80);
+    } else {
+      ctx.font = 'bold 26px "Space Grotesk", system-ui, sans-serif';
+      ctx.fillStyle = tuning.colors.goalLime;
+      ctx.fillText("✓ LISTO", cx, cy + 80);
+    }
+  }
+  _updateRoul(t){
+    const el = t - this._rouletteStart;
+    if(el >= 2000){ this._rouletteCur = this._rouletteFinal; return; }
+    const intv = 70 * (1 + el / 200);
+    const step = Math.floor(el / intv);
+    const pool = MODIFIERS.filter(m => m.id !== "none");
+    this._rouletteCur = pool[step % pool.length].id;
+  }
+  _drawRoul(ctx, cx, cy){
+    const def = MODIFIERS.find(m => m.id === this._rouletteCur) || MODIFIERS[0];
+    const el = performance.now() - this._rouletteStart;
+    const locked = el >= 2000;
+    ctx.font = 'bold 16px "Space Grotesk", system-ui, sans-serif';
+    ctx.fillStyle = tuning.colors.uiTextDim; ctx.textAlign = "center";
+    ctx.fillText("MODIFICADOR", cx, cy - 38);
+    const cw = 320, chh = 56;
+    const cxl = cx - cw/2, cyl = cy - chh/2;
+    ctx.fillStyle = locked ? "rgba(157,43,255,0.25)" : "rgba(255,255,255,0.05)";
+    ctx.strokeStyle = locked ? tuning.colors.modifierViolet : tuning.colors.uiTextDim;
+    ctx.lineWidth = 2;
+    ctx.beginPath();
+    if(ctx.roundRect) ctx.roundRect(cxl, cyl, cw, chh, 8);
+    else ctx.rect(cxl, cyl, cw, chh);
+    ctx.fill(); ctx.stroke();
+    ctx.font = 'bold 24px "Space Grotesk", system-ui, sans-serif';
+    ctx.fillStyle = tuning.colors.uiText;
+    ctx.fillText(def.emoji + "  " + def.name, cx, cy);
+  }
+}
+
+class ResultScreen {
+  constructor({matchState, bus}){
+    this._ms = matchState; this._bus = bus; this.zOrder = 49;
+    bus.on("restart-pressed", () => { if(this._ms.phase === PHASE.RESULT) bus.emit("rematch-requested"); });
+    bus.on("pause-pressed",   () => { if(this._ms.phase === PHASE.RESULT) bus.emit("back-to-menu-requested"); });
+  }
+  get visible(){ return this._ms.phase === PHASE.RESULT; }
+  draw(ctx, t){
+    const w = tuning.field.width, h = tuning.field.height, ms = this._ms;
+    const winner = ms.winner;
+    ctx.fillStyle = "rgba(0,0,0,0.7)"; ctx.fillRect(0, 0, w, h);
+    ctx.textAlign = "center"; ctx.textBaseline = "middle";
+    let title, winColor;
+    if(winner === "p1"){ title = "¡P1 GANÓ!"; winColor = tuning.colors.p1Cyan; }
+    else if(winner === "p2"){ title = "¡P2 GANÓ!"; winColor = tuning.colors.p2Magenta; }
+    else { title = "EMPATE"; winColor = tuning.colors.uiText; }
+    ctx.font = 'bold 96px "Space Grotesk", system-ui, sans-serif';
+    ctx.fillStyle = winColor; ctx.fillText(title, w/2 - 3, h/2 - 100);
+    ctx.fillText(title, w/2 + 3, h/2 - 100);
+    ctx.fillStyle = tuning.colors.uiText; ctx.fillText(title, w/2, h/2 - 100);
+    ctx.font = 'bold 48px ui-monospace, monospace';
+    ctx.fillStyle = tuning.colors.p1Cyan;    ctx.textAlign = "right";  ctx.fillText(String(ms.scores.p1), w/2 - 30, h/2);
+    ctx.fillStyle = tuning.colors.uiTextDim; ctx.textAlign = "center"; ctx.fillText("—", w/2, h/2);
+    ctx.fillStyle = tuning.colors.p2Magenta; ctx.textAlign = "left";   ctx.fillText(String(ms.scores.p2), w/2 + 30, h/2);
+    if(winner){
+      const ch = getCharacterById(ms.selection[winner]);
+      ctx.font = 'italic 20px "Space Grotesk", system-ui, sans-serif';
+      ctx.fillStyle = tuning.colors.uiTextDim; ctx.textAlign = "center";
+      ctx.fillText(ch.name + ': "' + ch.taunt + '"', w/2, h/2 + 60);
+    }
+    const k = 0.5 + 0.5 * Math.sin(t/350);
+    ctx.font = 'bold 22px "Space Grotesk", system-ui, sans-serif';
+    ctx.fillStyle = "rgba(232,241,255," + (0.4 + 0.6*k).toFixed(2) + ")";
+    ctx.textAlign = "center";
+    ctx.fillText("R · REVANCHA       ESC · MENÚ", w/2, h/2 + 130);
+  }
+}
+
+// ═══════════════════════════════════════════════════════════
+//  BOOTSTRAP
+// ═══════════════════════════════════════════════════════════
+const bus      = new EventBus();
+const loop     = new GameLoop();
+const input    = new InputBus({bus});
+const canvas   = document.getElementById("game-canvas");
+const ctxWrap  = new RenderContext({canvas});
+const renderer = new Renderer({ctxWrap, bus});
+const audio    = new AudioCtx();
+const physics    = new Physics();
+const collision  = new Collision({bus});
+const matchState = new MatchState({bus});
+
+// Static geometry
+const F = tuning.field;
+collision.registerAABB({x:0, y:F.floorY, width:F.width, height:200, layer:LAYER.FLOOR});
+collision.registerAABB({x:0, y:-200, width:F.width, height:200, layer:LAYER.WALL});
+collision.registerAABB({x:-F.wallThickness, y:0, width:F.wallThickness, height:F.floorY, layer:LAYER.WALL});
+collision.registerAABB({x:F.width, y:0, width:F.wallThickness, height:F.floorY, layer:LAYER.WALL});
+const gYTop = F.floorY - F.goalHeight, gYBot = F.floorY;
+collision.registerAABB({x:0,               y:gYTop - 8, width:F.goalWidth, height:8, layer:LAYER.POST});
+collision.registerAABB({x:F.width - F.goalWidth, y:gYTop - 8, width:F.goalWidth, height:8, layer:LAYER.POST});
+collision.registerGoal({side:"left",  x:F.goalWidth,           yTop:gYTop, yBottom:gYBot, scoringPlayerId:"p1"});
+collision.registerGoal({side:"right", x:F.width - F.goalWidth, yTop:gYTop, yBottom:gYBot, scoringPlayerId:"p2"});
+
+const p1 = new PlayerCharacter({id:"p1", spawnX:320, spawnY:500, color:tuning.colors.p1Cyan,    physics, collision, bus, mouthShape:"smile"});
+const p2 = new PlayerCharacter({id:"p2", spawnX:960, spawnY:500, color:tuning.colors.p2Magenta, physics, collision, bus, mouthShape:"line"});
+const ball = new Ball({x:F.centerX, y:F.centerY - tuning.ball.spawnHeightOffset, physics, collision, bus});
+
+const particles  = new ParticleSystem({bus});
+new JuiceController({bus, loop, ctxWrap});
+new AudioPlayer({audioCtx:audio, bus});
+const modSys = new ModifierSystem({physics, collision, ball, bus});
+
+bus.on("ball-hit-head", () => particles.noteBallPosition(ball.x, ball.y));
+
+const menu       = new MainMenu({matchState});
+const charSel    = new CharacterSelect({matchState, bus});
+const resultScr  = new ResultScreen({matchState, bus});
+const hud        = new HUD({matchState, p1, p2});
+
+renderer.register(p1); renderer.register(p2); renderer.register(ball);
+renderer.register(particles); renderer.register(hud);
+renderer.register(menu); renderer.register(charSel); renderer.register(resultScr);
+
+loop.start(
+  (dt) => {
+    const ph = matchState.phase;
+    if(ph === PHASE.PLAYING || ph === PHASE.GOAL_PAUSE || ph === PHASE.COUNTDOWN){
+      physics.step(dt); collision.step();
+      p1.update(dt); p2.update(dt); ball.update(dt); particles.update(dt);
+    }
+    matchState.tick(dt); input.tick();
+  },
+  (alpha, t) => renderer.render(alpha, t)
+);
+
+// Phase transitions
+function leaveMenu(){
+  if(matchState.phase !== PHASE.MENU) return;
+  matchState.goto(PHASE.CHAR_SELECT); charSel.enter();
+}
+["p1-jump-pressed","p2-jump-pressed","p1-special-pressed","p2-special-pressed","restart-pressed"].forEach(ev => bus.on(ev, leaveMenu));
+
+bus.on("selections-finalized", ({p1:c1, p2:c2, modifier}) => {
+  const ch1 = getCharacterById(c1), ch2 = getCharacterById(c2);
+  p1.mouthShape = ch1.mouthShape; p2.mouthShape = ch2.mouthShape;
+  p1.specialType = ch1.specialType; p2.specialType = ch2.specialType;
+  modSys.setActive(modifier);
+  p1.x = 320; p1.y = 500; p1.vx = 0; p1.vy = 0;
+  p2.x = 960; p2.y = 500; p2.vx = 0; p2.vy = 0;
+  ball.reset();
+  matchState.goto(PHASE.COUNTDOWN);
+});
+
+bus.on("rematch-requested", () => {
+  if(matchState.phase !== PHASE.RESULT) return;
+  modSys.clear(); matchState.goto(PHASE.CHAR_SELECT); charSel.enter();
+});
+bus.on("back-to-menu-requested", () => { modSys.clear(); matchState.goto(PHASE.MENU); });
+
+bus.on("p1-special-pressed", () => { if(matchState.phase === PHASE.PLAYING) tryFireSpecial(p1, ball, bus); });
+bus.on("p2-special-pressed", () => { if(matchState.phase === PHASE.PLAYING) tryFireSpecial(p2, ball, bus); });
+
+bus.on("special-vfx", ({x, y, color}) => { particles._spawnBurst(x, y, color, 10, 400); });
+
+console.log("MEGA HEAD CUP single-file build ready. P1: WASD+G · P2: Arrows+, · R restart · Esc menu.");
+</script>
+</body>
+</html>
